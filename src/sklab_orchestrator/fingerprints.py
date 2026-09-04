@@ -8,6 +8,8 @@ import re
 from datetime import UTC, datetime
 from typing import Any
 
+from sklab_orchestrator.security import scrub_text
+
 
 def sha256_hex(data: str) -> str:
     return hashlib.sha256(data.encode("utf-8")).hexdigest()
@@ -56,6 +58,8 @@ def _slugify(text: str, max_words: int = 4) -> str:
 def generate_run_id(instruction: str = "", now: datetime | None = None) -> str:
     ts = now or datetime.now(UTC)
     stamp = ts.strftime("%Y%m%d-%H%M%S")
-    slug = _slugify(instruction or "task")
+    # Slug from the scrubbed instruction: run_id becomes directory names and URL
+    # segments, so a pasted secret must never land in it (live leak-test finding).
+    slug = _slugify(scrub_text(instruction or "task"))
     fp = hashlib.sha256(f"{instruction}|{ts.isoformat()}".encode()).hexdigest()[:6]
     return f"{stamp}-{slug}-{fp}"

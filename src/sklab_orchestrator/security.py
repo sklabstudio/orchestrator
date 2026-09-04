@@ -22,6 +22,15 @@ _SECRET_TOKEN_RES = (
 # Whole whitespace-delimited tokens containing fake/test markers.
 _HINT_TOKEN_RE = re.compile(r"\S*(?:FAKE_SECRET|do-not-leak)\S*", re.I)
 
+# Structural identity keys: system-generated, never user secrets. Scrubbing
+# them would break store identity (run.json path vs in-memory id mismatch),
+# so their values pass through untouched. User content (instructions, prompts,
+# patches, evidence) is always scrubbed.
+_IDENTITY_KEYS = frozenset({
+    "run_id", "attempt_id", "task_id", "patch_fingerprint",
+    "failure_fingerprint", "fingerprint", "workflow_fingerprint",
+})
+
 # known fake/real values registered at runtime for redaction
 _KNOWN_VALUES: set[str] = set()
 
@@ -56,7 +65,9 @@ def scrub_dict(data: Any) -> Any:
     if isinstance(data, dict):
         out: dict[str, Any] = {}
         for k, v in data.items():
-            if isinstance(k, str) and _SECRET_KEYS.search(k) and isinstance(v, str):
+            if isinstance(k, str) and k in _IDENTITY_KEYS and isinstance(v, str):
+                out[k] = v
+            elif isinstance(k, str) and _SECRET_KEYS.search(k) and isinstance(v, str):
                 out[k] = "***REDACTED***"
             else:
                 out[k] = scrub_dict(v)
