@@ -10,7 +10,17 @@ import re
 from typing import Any
 
 _SECRET_KEYS = re.compile(r"(token|secret|api[_-]?key|password|passwd|bearer|private[_-]?key)", re.I)
-_SECRET_VALUE_HINT = re.compile(r"(sk-|ghp_|gho_|AKIA|FAKE_SECRET|do-not-leak)", re.I)
+
+# Well-known provider-key shapes (conservative lengths so ordinary prose
+# like "sk-lab" is never mangled).
+_SECRET_TOKEN_RES = (
+    re.compile(r"sk-[A-Za-z0-9]{20,}"),
+    re.compile(r"ghp_[A-Za-z0-9]{20,}|gho_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}"),
+    re.compile(r"AKIA[0-9A-Z]{16}"),
+    re.compile(r"xox[bpas]-[A-Za-z0-9-]{8,}"),
+)
+# Whole whitespace-delimited tokens containing fake/test markers.
+_HINT_TOKEN_RE = re.compile(r"\S*(?:FAKE_SECRET|do-not-leak)\S*", re.I)
 
 # known fake/real values registered at runtime for redaction
 _KNOWN_VALUES: set[str] = set()
@@ -33,6 +43,12 @@ def scrub_text(text: str) -> str:
             out = out.replace(v, "***REDACTED***")
     # generic: mask FAKE_SECRET_TOKEN=... patterns
     out = re.sub(r"(?i)(secret|token|api[_-]?key)\s*=\s*[^\s\"']+", r"\1=***REDACTED***", out)
+    # value-hint scrubbing (live finding: the hint regex existed but was never
+    # applied, so fake/test secrets and pasted provider keys persisted verbatim
+    # in run history). Shapes are conservative; ordinary prose is untouched.
+    for rx in _SECRET_TOKEN_RES:
+        out = rx.sub("***REDACTED***", out)
+    out = _HINT_TOKEN_RE.sub("***REDACTED***", out)
     return out
 
 
