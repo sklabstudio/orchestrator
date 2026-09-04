@@ -118,6 +118,7 @@ def test_uninstalled_adapters_are_not_candidates(monkeypatch):
         stderr = ""
 
     monkeypatch.setattr(integ, "_try_import", lambda *a, **k: None)
+    monkeypatch.setattr(integ, "_cli_available", lambda cmd: True)
     monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Out())
     agents = AgentAdaptersIntegration().list_agents()
     assert [a.agent_id for a in agents] == ["real"]
