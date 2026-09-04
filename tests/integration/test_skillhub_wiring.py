@@ -5,6 +5,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 from fake_stack.fakes import (  # noqa: E402
@@ -79,3 +81,43 @@ def test_no_public_to_private_dependency():
     assert "sklab_protocol_intelligence" not in src
     assert "sklab_skill_hub" in src  # PUBLIC -> PUBLIC allowed
     assert "sklab-skills" in src  # CLI fallback is machine-readable JSON
+
+
+def test_cli_fallback_uses_search_subcommand(monkeypatch):
+    """Live-VPS finding: the CLI fallback called a nonexistent `resolve` command."""
+    import shutil
+    import sys
+
+    if shutil.which("sklab-skills") is None:
+        pytest.skip("sklab-skills binary not installed")
+    monkeypatch.setitem(sys.modules, "sklab_skill_hub", None)
+    res = SkillHubIntegration.resolve("Fix the failing test", category="", limit=3)
+    assert res is not None, "search-based CLI fallback must resolve"
+    assert res["via"] == "skill-hub-cli-json", res
+    assert res["skills"], res
+    top = res["skills"][0]
+    assert top["skill_id"] and top["trust"] not in ("BLOCKED", "QUARANTINED")
+    assert len(res["skills"]) <= 3
+
+
+def test_uninstalled_adapters_are_not_candidates(monkeypatch):
+    """Known-but-absent agents must not become plan candidates (dead-end routing)."""
+    import json
+    import subprocess
+
+    from sklab_orchestrator.integrations import AgentAdaptersIntegration
+
+    payload = json.dumps({"adapters": [
+        {"agent_id": "ghost", "installed": False, "compatibility": "UNAVAILABLE"},
+        {"agent_id": "real", "installed": True, "compatibility": "READY"},
+    ]})
+
+    class _Out:
+        returncode = 0
+        stdout = payload
+        stderr = ""
+
+    monkeypatch.setattr(integ, "_try_import", lambda *a, **k: None)
+    monkeypatch.setattr(subprocess, "run", lambda *a, **k: _Out())
+    agents = AgentAdaptersIntegration().list_agents()
+    assert [a.agent_id for a in agents] == ["real"]

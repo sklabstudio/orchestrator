@@ -72,6 +72,10 @@ class AgentAdaptersIntegration:
                     items = data if isinstance(data, list) else data.get("agents", data.get("adapters", []))
                     result = []
                     for a in items:
+                        # Only installed adapters are usable candidates; reporting
+                        # known-but-absent agents caused routing to dead ends.
+                        if not isinstance(a, dict) or not a.get("installed"):
+                            continue
                         result.append(AgentInfo(
                             agent_id=str(a.get("id", a.get("agent_id", "unknown"))),
                             installed=True,
@@ -148,7 +152,8 @@ class ProviderConnectionsIntegration:
                 if out.returncode == 0:
                     import json
                     data = json.loads(out.stdout or "[]")
-                    items = data if isinstance(data, list) else data.get("connections", [])
+                    items = data if isinstance(data, list) else data.get(
+                        "connections", data.get("data", []))
                     res = []
                     for c in items:
                         res.append(ConnectionInfo(
@@ -186,7 +191,7 @@ class RepoContextIntegration:
         if _cli_available("repocontext"):
             try:
                 out = subprocess.run(
-                    ["repocontext", "inspect", "--repo", repo_path, "--json"],
+                    ["repocontext", "inspect", repo_path, "--json"],
                     capture_output=True, text=True, timeout=30,
                 )
                 if out.returncode == 0:
@@ -371,8 +376,8 @@ class SkillHubIntegration:
     """Typed Skill Hub adapter: task-aware skill resolution for plans.
 
     Primary: ``sklab_skill_hub.service.resolve_for_task`` (deterministic,
-    machine-readable). Fallback: ``sklab-skills resolve --json`` CLI
-    (``orchestrator_skill_payload`` list — never human/Rich output).
+    machine-readable). Fallback: ``sklab-skills search --json`` CLI
+    (typed skill records — never human/Rich output; limit applied client-side).
     Read-only: never installs, enables, or auto-executes skills. The hub's own
     resolver excludes QUARANTINED/BLOCKED/DISABLED records, so unsafe community
     skills are never selected automatically. Returns None when unavailable so
@@ -445,6 +450,30 @@ class SkillHubIntegration:
         return SkillHubIntegration._normalize(
             hits, "skill-hub-python-api", SkillHubIntegration.version())
 
+    _SEARCH_STOPWORDS = frozenset(
+        "with that this from into over under after before between through "
+        "have has had will would should could been were what when where "
+        "which their there then than them they your yours ours only also "
+        "very just need needs using used make made many much such each other "
+        "failing fail error issue problem please help".split()
+    )
+
+    @staticmethod
+    def _search_hub(query: str) -> list[dict[str, Any]]:
+        """One machine-readable hub search; [] on any failure (never raises)."""
+        try:
+            import json
+            out = subprocess.run(
+                ["sklab-skills", "search", query, "--json"],
+                capture_output=True, text=True, timeout=30)
+            if out.returncode != 0 or not out.stdout.strip():
+                return []
+            data = json.loads(out.stdout)
+            items = data if isinstance(data, list) else data.get("skills", data.get("data", []))
+            return [h for h in items] if isinstance(items, list) else []
+        except Exception:
+            return []
+
     @staticmethod
     def _resolve_cli(task: str, category: str,
                      required_capabilities: list[str] | None,
@@ -452,19 +481,34 @@ class SkillHubIntegration:
         if not _cli_available("sklab-skills"):
             return None
         try:
-            import json
-            argv = ["sklab-skills", "resolve", "--task", task, "--limit", str(limit), "--json"]
+            import re
+            # NOTE: there is no `resolve` subcommand; `search --json` emits the
+            # typed builtin+installed registry but matches substrings only, so a
+            # full-sentence task rarely hits. Keyword fallback keeps the CLI path
+            # task-aware (python API remains primary where importable).
+            seen: dict[str, dict[str, Any]] = {}
+            for h in SkillHubIntegration._search_hub(task):
+                if isinstance(h, dict):
+                    seen.setdefault(str(h.get("skill_id", h.get("id", "unknown"))), h)
+            if not seen and task:
+                tokens = [t for t in re.findall(r"[a-z0-9]+", task.lower())
+                          if len(t) >= 4 and t not in SkillHubIntegration._SEARCH_STOPWORDS][:5]
+                for tok in tokens:
+                    for h in SkillHubIntegration._search_hub(tok):
+                        if isinstance(h, dict):
+                            seen.setdefault(str(h.get("skill_id", h.get("id", "unknown"))), h)
+                    if seen:
+                        break
+            items = list(seen.values())
+            if not items:
+                return None
             if category:
-                argv += ["--category", category]
-            if required_capabilities:
-                argv += ["--required-capabilities", ",".join(required_capabilities)]
-            out = subprocess.run(argv, capture_output=True, text=True, timeout=30)
-            if out.returncode != 0 or not out.stdout.strip():
-                return None
-            data = json.loads(out.stdout)
-            items = data if isinstance(data, list) else data.get("skills", [])
-            if not isinstance(items, list) or not items:
-                return None
+                wanted = category.strip().lower()
+                filtered = [h for h in items
+                            if str(h.get("category", "")).strip().lower() == wanted]
+                if filtered:
+                    items = filtered
+            items = items[: max(1, limit)]
             return SkillHubIntegration._normalize(items, "skill-hub-cli-json", None)
         except Exception:
             return None
