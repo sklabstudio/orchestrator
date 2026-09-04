@@ -394,3 +394,34 @@ def test_state_persisted_and_resumable(tmp_path, monkeypatch):
     assert _result.status == "VERIFIED_SUCCESS"
     assert (run_dir / "result.json").exists()
     assert (run_dir / "attempts.jsonl").exists()
+
+
+def test_execute_verifies_patch_against_pristine_repo(tmp_path, monkeypatch):
+    """Live-VPS finding: verifying against the agent-mutated workspace forces
+    PATCH_ALREADY_APPLIED (REVIEW at best). The task repository is the clean
+    baseline the patch is claimed against."""
+    from sklab_orchestrator.service import verify_target
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "app.py").write_text("x = 1\n", encoding="utf-8")
+    work = tmp_path / "work"
+    assert verify_target(str(repo), str(work)) == str(repo)
+    assert verify_target("", str(work)) == str(work)
+    assert verify_target(str(tmp_path / "missing"), str(work)) == str(work)
+
+    seen: dict[str, str] = {}
+
+    def rec_verifier(patch: str, workspace: str) -> dict:
+        seen["workspace"] = workspace
+        return {"verdict": "ACCEPT", "score": 95.0, "regressions": [],
+                "checks": [], "warnings": [], "strength": "FULL"}
+
+    svc = _svc(tmp_path, monkeypatch,
+               catalog=lambda: catalog_single("good-agent"),
+               verifier_fn=rec_verifier)
+    rec = svc.create_run("Fix bug", repo=str(repo),
+                         options={"agent": "good-agent", "max_attempts": 1})
+    result = svc.execute_run(rec.run_id)
+    assert result.status == "VERIFIED_SUCCESS"
+    assert seen.get("workspace") == str(repo)

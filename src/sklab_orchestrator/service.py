@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from sklab_orchestrator.config import OrchestratorConfig, load_config
@@ -68,6 +69,20 @@ from sklab_orchestrator.workspace import (
 )
 
 SUCCESS_SCORE_THRESHOLD = 70.0
+
+
+def verify_target(task_repository: str, workspace: str | Path) -> str:
+    """Directory PatchBench should apply the claimed patch onto.
+
+    Agents mutate the workspace in place, so verifying against the workspace
+    always reports PATCH_ALREADY_APPLIED (REVIEW at best). The task repository
+    is the pristine baseline the patch is claimed against; fall back to the
+    workspace only when the task has no repository.
+    """
+    repo = (task_repository or "").strip()
+    if repo and Path(repo).exists():
+        return repo
+    return str(workspace)
 
 
 class OrchestratorService:
@@ -529,7 +544,8 @@ class OrchestratorService:
                     pass
                 self.store.emit(run_id, "VERIFICATION_STARTED", {"attempt": attempt_id})
                 verification = self.verifier.verify(
-                    outcome.patch, str(workspace), list(rec.task.required_checks))
+                    outcome.patch, verify_target(rec.task.repository, str(workspace)),
+                    list(rec.task.required_checks))
                 last_verification = verification
                 self.store.emit(run_id, "VERIFICATION_COMPLETED",
                                 {"attempt": attempt_id, "verdict": verification.verdict,
@@ -628,8 +644,8 @@ class OrchestratorService:
             # crash after patch capture: verify last attempt without rerunning agent
             last = rec.attempts[-1] if rec.attempts else None
             if last is not None and not last.verification:
-                verification = self.verifier.verify(last.patch, last.workspace or "",
-                                                    list(rec.task.required_checks))
+                verification = self.verifier.verify(last.patch, verify_target(
+                    rec.task.repository, last.workspace or ""), list(rec.task.required_checks))
                 for a in rec.attempts:
                     if a.attempt_id == last.attempt_id:
                         ev0 = analyze_failure(verification, a.status, a.patch)
