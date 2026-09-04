@@ -1,0 +1,66 @@
+[project]
+name = "sklab-orchestrator"
+version = "0.1.0"
+description = "Turn a development task into a verified result by coordinating context, agents, providers, environments, skills, retries, and verification."
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [{ name = "SKLab Studio", email = "hello@sklabstudio.example" }]
+keywords = ["orchestration", "agents", "verification", "routing", "ai"]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Software Development :: Libraries :: Python Modules",
+]
+dependencies = [
+  "typer>=0.9.0",
+  "rich>=13.0.0",
+  "pydantic>=2.0.0",
+  "pyyaml>=6.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.0.0",
+  "ruff>=0.4.0",
+  "mypy>=1.10.0",
+  "build>=1.0.0",
+]
+
+[project.scripts]
+sklab-run = "sklab_orchestrator.cli:app"
+
+[project.urls]
+Homepage = "https://github.com/sklabstudio/orchestrator"
+Repository = "https://github.com/sklabstudio/orchestrator"
+
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff]
+target-version = "py312"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501", "B008", "B904", "UP042"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["E501", "B011", "B008", "B904", "S101", "ARG"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = false
+ignore_missing_imports = true
+warn_unused_configs = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

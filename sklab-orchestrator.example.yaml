@@ -1,0 +1,37 @@
+schema_version: 1
+
+routing:
+  mode: cheap_first
+  preferred_agents: []
+  categories:
+    bug_fix:
+      preferred_agents: []
+    documentation:
+      preferred_agents: []
+
+execution:
+  max_attempts: 3
+  default_timeout_seconds: 1800
+  use_reprobox: true
+  policy: NORMAL
+  retry_policy: ADAPTIVE
+  auto_apply_patch: false
+
+verification:
+  provider: patchbench
+
+budget:
+  max_cost: 1.00
+  currency: USD
+  max_attempts: 3
+  max_total_minutes: 30
+  require_approval_for_paid: true
+
+skills:
+  builtin: true
+  coding_lab: true
+
+safety:
+  auto_apply_patch: false
+  auto_push: false
+  deployment: false
