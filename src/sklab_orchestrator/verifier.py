@@ -77,16 +77,21 @@ class Verifier:
             except Exception as e:  # noqa: BLE001
                 return VerificationResult(verdict="REJECT", score=0.0,
                                           warnings=[f"verifier error: {e}"], strength="FALLBACK")
-        # Try real PatchBench (machine-readable JSON only), else fallback
+        # Try real PatchBench (canonical Python API, else machine-readable JSON CLI), else fallback
         try:
             data = PatchBenchIntegration.verify(patch, workspace)
             if isinstance(data, dict) and data:
+                warnings = list(data.get("warnings", []))
+                if data.get("via"):
+                    warnings.append(f"verification_via: {data['via']}")
+                if data.get("verdict_reason"):
+                    warnings.append(f"patchbench: {data['verdict_reason']}")
                 return VerificationResult(
                     verdict=str(data.get("verdict", data.get("result", "UNKNOWN"))).upper(),
                     score=float(data.get("score", 0.0)),
                     regressions=list(data.get("regressions", [])),
                     checks=list(data.get("checks", [])),
-                    warnings=list(data.get("warnings", [])),
+                    warnings=warnings,
                     strength="FULL", raw=data,
                 )
         except Exception:

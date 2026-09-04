@@ -54,7 +54,9 @@ class AgentAdaptersIntegration:
         mod = _try_import("sklab_agent_adapters")
         if mod is not None:
             try:
-                return self._via_python(mod)
+                via_python = self._via_python(mod)
+                if via_python:
+                    return via_python
             except Exception:
                 pass
         # CLI probe (zero-cost): list agents if sklab-agents CLI exists
@@ -67,7 +69,7 @@ class AgentAdaptersIntegration:
                 if out.returncode == 0:
                     import json
                     data = json.loads(out.stdout or "[]")
-                    items = data if isinstance(data, list) else data.get("agents", [])
+                    items = data if isinstance(data, list) else data.get("agents", data.get("adapters", []))
                     result = []
                     for a in items:
                         result.append(AgentInfo(
@@ -137,10 +139,10 @@ class ProviderConnectionsIntegration:
                             ) for c in data]
             except Exception:
                 pass
-        if _cli_available("sklab-connections"):
+        if _cli_available("sklab-connect"):
             try:
                 out = subprocess.run(
-                    ["sklab-connections", "list", "--json"], capture_output=True,
+                    ["sklab-connect", "list", "--json"], capture_output=True,
                     text=True, timeout=15,
                 )
                 if out.returncode == 0:
@@ -177,14 +179,14 @@ class ProviderConnectionsIntegration:
 class RepoContextIntegration:
     @staticmethod
     def available() -> bool:
-        return _try_import("repocontext") is not None or _cli_available("repo-context")
+        return _try_import("repocontext") is not None or _cli_available("repocontext")
 
     @staticmethod
     def inspect(repo_path: str) -> dict[str, Any]:
-        if _cli_available("repo-context"):
+        if _cli_available("repocontext"):
             try:
                 out = subprocess.run(
-                    ["repo-context", "inspect", "--repo", repo_path, "--json"],
+                    ["repocontext", "inspect", "--repo", repo_path, "--json"],
                     capture_output=True, text=True, timeout=30,
                 )
                 if out.returncode == 0:
@@ -235,40 +237,113 @@ class ReproBoxIntegration:
 
 
 class PatchBenchIntegration:
+    """Canonical PatchBench verification contract (v0.1).
+
+    Primary: typed Python API ``patchbench.commands.evaluate.run_evaluation``
+    (returns ``EvaluationResult`` with ``verdict`` ACCEPT/REVIEW/REJECT/
+    INCONCLUSIVE and ``score``). Fallback: machine-readable
+    ``patchbench evaluate --json`` CLI. The ``via`` key records which path
+    produced the result, so a broken primary is never silently hidden.
+    Returns None only when PatchBench is absent or both paths fail, letting
+    the caller use its local fallback explicitly.
+    """
+
     @staticmethod
     def available() -> bool:
         return _try_import("patchbench") is not None or _cli_available("patchbench")
 
     @staticmethod
-    def verify(patch: str, workspace: str) -> dict[str, Any] | None:
-        if _cli_available("patchbench"):
+    def verify(patch: str, workspace: str, timeout: int = 120) -> dict[str, Any] | None:
+        import tempfile
+
+        if not patch or not patch.strip():
+            # Nothing to verify: let the caller use its explicit fallback.
+            return None
+        with tempfile.NamedTemporaryFile("w", suffix=".diff", delete=False) as f:
+            f.write(patch)
+            pf = f.name
+        try:
+            via_python = PatchBenchIntegration._verify_python_api(pf, workspace, timeout)
+            if via_python is not None:
+                return via_python
+            return PatchBenchIntegration._verify_cli(pf, workspace, timeout)
+        finally:
             try:
-                import json
-                import tempfile
-                with tempfile.NamedTemporaryFile("w", suffix=".diff", delete=False) as f:
-                    f.write(patch)
-                    pf = f.name
-                out = subprocess.run(
-                    ["patchbench", "verify", "--patch", pf, "--workspace", workspace, "--json"],
-                    capture_output=True, text=True, timeout=120,
-                )
-                try:
-                    Path(pf).unlink(missing_ok=True)  # type: ignore[arg-type]
-                except Exception:
-                    pass
-                if out.returncode in (0, 1, 2) and out.stdout.strip():
-                    # find last JSON object in stdout
-                    txt = out.stdout.strip().splitlines()
-                    for line in reversed(txt):
-                        try:
-                            data = json.loads(line)
-                            if isinstance(data, dict):
-                                return data
-                        except Exception:
-                            continue
+                Path(pf).unlink(missing_ok=True)  # type: ignore[arg-type]
             except Exception:
                 pass
-        return None
+
+    @staticmethod
+    def _verify_python_api(patch_file: str, workspace: str, timeout: int) -> dict[str, Any] | None:
+        try:
+            from patchbench.commands.evaluate import run_evaluation
+            from patchbench.core.config import PatchBenchConfig
+        except Exception:
+            return None
+        try:
+            cfg = PatchBenchConfig()
+            cfg = cfg.apply_cli_overrides(timeout=timeout, offline=True)
+            result, baseline_log, candidate_log, _ = run_evaluation(
+                repo=workspace, patch=patch_file, config=cfg,
+            )
+        except Exception:
+            return None
+        try:
+            verdict = result.verdict.value if hasattr(result.verdict, "value") else str(result.verdict)
+            return {
+                "verdict": str(verdict).upper(),
+                "score": float(getattr(result, "score", 0) or 0),
+                "verdict_reason": str(getattr(result, "verdict_reason", "")),
+                "new_regressions": getattr(result, "new_regressions", 0) or 0,
+                "baseline_failures": getattr(result, "baseline_failures", 0) or 0,
+                "via": "patchbench-python-api",
+            }
+        except Exception:
+            return None
+
+    @staticmethod
+    def _verify_cli(patch_file: str, workspace: str, timeout: int) -> dict[str, Any] | None:
+        if not _cli_available("patchbench"):
+            return None
+        try:
+            import json
+            out = subprocess.run(
+                ["patchbench", "evaluate", "--patch", patch_file,
+                 "--repo", workspace, "--json", "--offline",
+                 "--timeout", str(timeout)],
+                capture_output=True, text=True, timeout=timeout + 60,
+            )
+            if not out.stdout.strip():
+                return None
+            data: dict[str, Any] | None = None
+            try:
+                whole = json.loads(out.stdout)
+                if isinstance(whole, dict) and "verdict" in whole:
+                    data = whole
+            except Exception:
+                data = None
+            if data is None:
+                for line in reversed(out.stdout.strip().splitlines()):
+                    try:
+                        candidate = json.loads(line)
+                        if isinstance(candidate, dict) and "verdict" in candidate:
+                            data = candidate
+                            break
+                    except Exception:
+                        continue
+            if data is None:
+                return None
+            return {
+                "verdict": str(data.get("verdict", "UNKNOWN")).upper(),
+                "score": float(data.get("score", 0) or 0),
+                "verdict_reason": str(data.get("verdict_reason", "")),
+                "new_regressions": data.get("new_regressions", 0) or 0,
+                "baseline_failures": data.get("baseline_failures", 0) or 0,
+                "schema_version": data.get("schema_version"),
+                "via": "patchbench-cli-json",
+            }
+        except Exception:
+            return None
 
 
 class BenchSuiteIntegration:
@@ -290,6 +365,109 @@ class BenchSuiteIntegration:
             except Exception:
                 pass
         return None
+
+
+class SkillHubIntegration:
+    """Typed Skill Hub adapter: task-aware skill resolution for plans.
+
+    Primary: ``sklab_skill_hub.service.resolve_for_task`` (deterministic,
+    machine-readable). Fallback: ``sklab-skills resolve --json`` CLI
+    (``orchestrator_skill_payload`` list — never human/Rich output).
+    Read-only: never installs, enables, or auto-executes skills. The hub's own
+    resolver excludes QUARANTINED/BLOCKED/DISABLED records, so unsafe community
+    skills are never selected automatically. Returns None when unavailable so
+    planning falls back to the builtin skill resolver gracefully.
+    """
+
+    @staticmethod
+    def available() -> bool:
+        return _try_import("sklab_skill_hub") is not None or _cli_available("sklab-skills")
+
+    @staticmethod
+    def version() -> str | None:
+        mod = _try_import("sklab_skill_hub")
+        if mod is not None:
+            ver = getattr(mod, "__version__", None)
+            return str(ver) if ver else "unknown"
+        return None
+
+    @staticmethod
+    def resolve(task: str, category: str = "",
+                required_capabilities: list[str] | None = None,
+                agent_capabilities: list[str] | None = None,
+                limit: int = 5) -> dict[str, Any] | None:
+        via_python = SkillHubIntegration._resolve_python_api(
+            task, category, required_capabilities, agent_capabilities, limit)
+        if via_python is not None:
+            return via_python
+        return SkillHubIntegration._resolve_cli(
+            task, category, required_capabilities, limit)
+
+    @staticmethod
+    def _normalize(records: list[Any], via: str, version: str | None) -> dict[str, Any] | None:
+        skills: list[dict[str, Any]] = []
+        for h in records:
+            if not isinstance(h, dict):
+                continue
+            skills.append({
+                "skill_id": str(h.get("skill_id", h.get("id", "unknown"))),
+                "version": str(h.get("version", "0.1.0")),
+                "trust": str(h.get("trust", "UNKNOWN")),
+                "risk": str(h.get("risk", "UNKNOWN")),
+                "permissions": h.get("permissions", {}),
+                "compatibility": h.get("compatibility", h.get("category", "")),
+                "warnings": list(h.get("warnings", []) or []),
+                "task_score": float(h.get("task_score", h.get("score", 0.0)) or 0.0),
+                "category": str(h.get("category", "")),
+            })
+        if not skills:
+            return None
+        return {"available": True, "version": version, "via": via, "skills": skills}
+
+    @staticmethod
+    def _resolve_python_api(task: str, category: str,
+                            required_capabilities: list[str] | None,
+                            agent_capabilities: list[str] | None,
+                            limit: int) -> dict[str, Any] | None:
+        try:
+            from sklab_skill_hub import service
+            from sklab_skill_hub.store import resolve_data_dir
+        except Exception:
+            return None
+        try:
+            data_dir = resolve_data_dir()
+            hits = service.resolve_for_task(
+                data_dir, task, category, required_capabilities, agent_capabilities, limit)
+        except Exception:
+            return None
+        if not isinstance(hits, list) or not hits:
+            return None
+        return SkillHubIntegration._normalize(
+            hits, "skill-hub-python-api", SkillHubIntegration.version())
+
+    @staticmethod
+    def _resolve_cli(task: str, category: str,
+                     required_capabilities: list[str] | None,
+                     limit: int) -> dict[str, Any] | None:
+        if not _cli_available("sklab-skills"):
+            return None
+        try:
+            import json
+            argv = ["sklab-skills", "resolve", "--task", task, "--limit", str(limit), "--json"]
+            if category:
+                argv += ["--category", category]
+            if required_capabilities:
+                argv += ["--required-capabilities", ",".join(required_capabilities)]
+            out = subprocess.run(argv, capture_output=True, text=True, timeout=30)
+            if out.returncode != 0 or not out.stdout.strip():
+                return None
+            data = json.loads(out.stdout)
+            items = data if isinstance(data, list) else data.get("skills", [])
+            if not isinstance(items, list) or not items:
+                return None
+            return SkillHubIntegration._normalize(items, "skill-hub-cli-json", None)
+        except Exception:
+            return None
 
 
 class CodingLabIntegration:

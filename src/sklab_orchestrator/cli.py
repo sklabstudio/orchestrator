@@ -21,6 +21,7 @@ from sklab_orchestrator.integrations import (
     ProviderConnectionsIntegration,
     RepoContextIntegration,
     ReproBoxIntegration,
+    SkillHubIntegration,
 )
 from sklab_orchestrator.service import OrchestratorService
 from sklab_orchestrator.store import RunStore
@@ -402,6 +403,7 @@ def doctor(
         "provider_connections": bool(ProviderConnectionsIntegration().list_connections()),
         "reprobox": ReproBoxIntegration.available(),
         "patchbench": PatchBenchIntegration.available(),
+        "skill_hub": SkillHubIntegration.available(),
         "benchsuite": BenchSuiteIntegration.available(),
         "coding_lab": CodingLabIntegration.available(),
         "python": True,

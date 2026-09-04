@@ -24,9 +24,11 @@ from sklab_orchestrator.integrations import (
     ProviderConnectionsIntegration,
     RepoContextIntegration,
     ReproBoxIntegration,
+    SkillHubIntegration,
 )
 from sklab_orchestrator.models import (
     AttemptRecord,
+    DecisionRecord,
     OrchestratorResult,
     Plan,
     RepoInfo,
@@ -196,6 +198,16 @@ class OrchestratorService:
             skill = resolver.resolve(cls.category.value, opts.get("skill"))
         except (KeyError, ValueError) as e:
             raise ValueError(str(e))
+        # Skill Hub direct wiring (read-only): task-aware resolution enriches the
+        # plan with hub-selected skills (trust/permissions/scores). Best-effort:
+        # planning never fails when the hub is unavailable.
+        skill_hub: dict[str, Any] | None = None
+        try:
+            skill_hub = SkillHubIntegration.resolve(
+                rec.task.instruction, cls.category.value,
+                [c for c in req_caps], None, limit=5)
+        except Exception:
+            skill_hub = None
         discovered = self.agents()
         user_agent = opts.get("agent")
         try:
@@ -288,6 +300,23 @@ class OrchestratorService:
         )
         if not ReproBoxIntegration.available() and plan.environment.get("use_reprobox"):
             plan.warnings.append("LOCAL_EXECUTION_NOT_HERMETIC")
+        if skill_hub and skill_hub.get("skills"):
+            hub_skills = skill_hub["skills"]
+            top = hub_skills[0]
+            plan.decisions.append(DecisionRecord(
+                decision="skill_hub_resolution",
+                candidates=[s["skill_id"] for s in hub_skills],
+                selected=top["skill_id"],
+                reason_codes=[f"via:{skill_hub.get('via', 'unknown')}"],
+                explanation=(
+                    f"Skill Hub v{skill_hub.get('version')} selected {top['skill_id']} "
+                    f"v{top['version']} (trust={top['trust']}, risk={top['risk']}, "
+                    f"score={top['task_score']}) for task-scoped use; "
+                    f"{len(hub_skills)} candidate(s), no persistent enable."),
+            ))
+            for s in hub_skills:
+                for w in s.get("warnings", []):
+                    plan.warnings.append(f"SKILL_HUB:{s['skill_id']}:{w}")
         self.store.save_plan(run_id, plan)
         rec = self.store.load_run(run_id)
         rec.plan = plan
