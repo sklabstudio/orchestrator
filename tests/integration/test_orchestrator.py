@@ -32,6 +32,7 @@ from sklab_orchestrator.runner import AgentRunner  # noqa: E402
 from sklab_orchestrator.service import OrchestratorService  # noqa: E402
 from sklab_orchestrator.store import RunStore  # noqa: E402
 from sklab_orchestrator.verifier import Verifier  # noqa: E402
+from sklab_orchestrator.workspace import cleanup_workspace, create_workspace  # noqa: E402
 
 
 def _svc(tmp_path, monkeypatch, catalog=catalog_full, conns=connections_free,
@@ -267,6 +268,27 @@ def test_dirty_repo_safety(tmp_path, monkeypatch):
     assert before_branch == subprocess.run(
         ["git", "branch", "--show-current"], cwd=str(repo),
         capture_output=True, text=True).stdout
+
+
+def test_agent_workspace_has_private_git_baseline(tmp_path):
+    repo = tmp_path / "source"
+    repo.mkdir()
+    (repo / "test_fix.py").write_text("assert 1 + 1 == 3\n", encoding="utf-8")
+    subprocess.run(["git", "init", "-q"], cwd=str(repo), check=True)
+    subprocess.run(["git", "config", "user.email", "t@t.t"], cwd=str(repo), check=True)
+    subprocess.run(["git", "config", "user.name", "t"], cwd=str(repo), check=True)
+    subprocess.run(["git", "add", "."], cwd=str(repo), check=True)
+    subprocess.run(["git", "commit", "-qm", "init"], cwd=str(repo), check=True)
+
+    workspace = create_workspace(str(repo), "private-baseline")
+    try:
+        assert (workspace / ".git").is_dir()
+        clean = subprocess.run(
+            ["git", "diff", "--quiet", "HEAD"], cwd=str(workspace), check=False
+        )
+        assert clean.returncode == 0
+    finally:
+        cleanup_workspace(workspace)
 
 
 def test_secret_boundary(tmp_path, monkeypatch):

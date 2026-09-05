@@ -55,10 +55,11 @@ def create_workspace(repo: str, run_id: str) -> Path:
         if src is not None and src.exists():
             if (src / ".git").exists():
                 # Prefer git worktree-like clone: copy tracked + untracked content cheaply.
-                # Use `git archive` for tracked files then copy untracked? Simpler: full copy
-                # excluding .git to keep workspace light, then record fingerprints.
+                # Copy project content without the source metadata, then create a
+                # private baseline repository so adapter patch capture can diff it.
                 shutil.copytree(src, dest / "work", ignore=shutil.ignore_patterns(".git"),
                                 dirs_exist_ok=True)
+                _initialize_workspace_repo(dest / "work")
             else:
                 shutil.copytree(src, dest / "work", dirs_exist_ok=True)
         else:
@@ -66,6 +67,26 @@ def create_workspace(repo: str, run_id: str) -> Path:
     except Exception:
         (dest / "work").mkdir(exist_ok=True)
     return dest / "work"
+
+
+def _initialize_workspace_repo(workspace: Path) -> None:
+    """Create a disposable Git baseline without touching the source repository."""
+    try:
+        commands = [
+            ["git", "init", "--quiet"],
+            ["git", "add", "--all"],
+            ["git", "-c", "user.name=SKLab", "-c", "user.email=sklab@localhost",
+             "commit", "--quiet", "--allow-empty", "-m", "SKLab baseline"],
+        ]
+        for argv in commands:
+            result = subprocess.run(
+                argv, cwd=str(workspace), capture_output=True, text=True, timeout=30,
+            )
+            if result.returncode != 0:
+                shutil.rmtree(workspace / ".git", ignore_errors=True)
+                return
+    except (OSError, subprocess.TimeoutExpired):
+        shutil.rmtree(workspace / ".git", ignore_errors=True)
 
 
 def cleanup_workspace(workspace: str | Path) -> None:

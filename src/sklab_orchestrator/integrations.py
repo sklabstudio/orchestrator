@@ -7,6 +7,7 @@ Secrets are only held in memory; never persisted (see security.py).
 from __future__ import annotations
 
 import importlib
+import json
 import shutil
 import subprocess
 from dataclasses import dataclass, field
@@ -30,6 +31,8 @@ class AgentInfo:
     agent_id: str
     installed: bool = False
     auth_ready: bool = False
+    auth_state: str = "AUTH_UNKNOWN"
+    version: str | None = None
     capabilities: list[str] = field(default_factory=list)
     cost_class: str = "unknown"
     paid: bool = False
@@ -67,7 +70,6 @@ class AgentAdaptersIntegration:
                     text=True, timeout=15,
                 )
                 if out.returncode == 0:
-                    import json
                     data = json.loads(out.stdout or "[]")
                     items = data if isinstance(data, list) else data.get("agents", data.get("adapters", []))
                     result = []
@@ -76,19 +78,54 @@ class AgentAdaptersIntegration:
                         # known-but-absent agents caused routing to dead ends.
                         if not isinstance(a, dict) or not a.get("installed"):
                             continue
+                        agent_id = str(a.get("id", a.get("agent_id", "unknown")))
+                        health: dict[str, Any] = {}
+                        capabilities: list[str] = list(a.get("capabilities", []))
+                        try:
+                            detail = self._run_json(["show", agent_id, "--json"])
+                            if isinstance(detail, dict):
+                                raw_health = detail.get("health")
+                                if isinstance(raw_health, dict):
+                                    health = raw_health
+                        except Exception:
+                            pass
+                        try:
+                            raw_caps = self._run_json(["capabilities", agent_id, "--json"])
+                            matrix = raw_caps.get("capabilities") if isinstance(raw_caps, dict) else None
+                            if isinstance(matrix, dict):
+                                capabilities = [
+                                    str(name) for name, info in matrix.items()
+                                    if isinstance(info, dict) and info.get("supported") is True
+                                ]
+                        except Exception:
+                            pass
+                        auth_state = str(health.get("auth_state", a.get("auth", "AUTH_UNKNOWN"))).upper()
                         result.append(AgentInfo(
-                            agent_id=str(a.get("id", a.get("agent_id", "unknown"))),
+                            agent_id=agent_id,
                             installed=True,
-                            auth_ready=str(a.get("auth", "")).upper() == "READY",
-                            capabilities=list(a.get("capabilities", [])),
+                            auth_ready=auth_state == "READY",
+                            auth_state=auth_state,
+                            version=str(health.get("version") or a.get("version") or "") or None,
+                            capabilities=capabilities,
                             cost_class=str(a.get("cost_class", "unknown")),
                             paid=bool(a.get("paid", False)),
+                            supports_model_selection="MODEL_SELECTION" in capabilities,
+                            supports_resume="SESSION_RESUME" in capabilities,
                         ))
                     if result:
                         return result
             except Exception:
                 pass
         return []
+
+    @staticmethod
+    def _run_json(args: list[str]) -> Any:
+        out = subprocess.run(
+            ["sklab-agents", *args], capture_output=True, text=True, timeout=30,
+        )
+        if out.returncode != 0:
+            return None
+        return json.loads(out.stdout or "null")
 
     def _via_python(self, mod: Any) -> list[AgentInfo]:
         # Best-effort: try known registry helpers without importing heavy submodules.
@@ -105,6 +142,7 @@ class AgentAdaptersIntegration:
                                     agent_id=str(a.get("id", "unknown")),
                                     installed=True,
                                     auth_ready=True,
+                                    auth_state="READY",
                                     capabilities=list(a.get("capabilities", [])),
                                     cost_class=str(a.get("cost_class", "unknown")),
                                 ))
@@ -118,8 +156,15 @@ class AgentAdaptersIntegration:
             try:
                 data = det.detect_agents()  # type: ignore[attr-defined]
                 if isinstance(data, list):
-                    return [AgentInfo(agent_id=str(getattr(a, "agent_id", a)), installed=True)
-                            for a in data]
+                    return [
+                        AgentInfo(
+                            agent_id=str(getattr(a, "agent_id", a)),
+                            installed=True,
+                            auth_ready=True,
+                            auth_state="READY",
+                        )
+                        for a in data
+                    ]
             except Exception:
                 pass
         return []
@@ -156,10 +201,11 @@ class ProviderConnectionsIntegration:
                         "connections", data.get("data", []))
                     res = []
                     for c in items:
+                        status = str(c.get("status", "")).upper()
                         res.append(ConnectionInfo(
                             connection_id=str(c.get("id", "unknown")),
                             enabled=bool(c.get("enabled", False)),
-                            ready=bool(c.get("ready", False)),
+                            ready=bool(c.get("ready", False)) or status == "READY",
                             default_model=c.get("default_model"),
                         ))
                     if res:

@@ -442,6 +442,19 @@ class OrchestratorService:
             attempt_id = f"attempt-{attempt_no}"
             self.store.emit(run_id, "ATTEMPT_STARTED",
                             {"attempt": attempt_id, "agent": current})
+
+            def on_agent_event(event: dict[str, Any]) -> None:
+                payload = dict(event) if isinstance(event, dict) else {"message": str(event)}
+                kind = str(payload.pop("event", payload.pop("type", "AGENT_EVENT")))
+                raw_message = payload.get("message") or payload.get("text") or kind
+                self.store.emit(run_id, "AGENT_EVENT", {
+                    "kind": kind,
+                    "message": str(raw_message)[:2000],
+                    "stream": payload.get("stream", "stdout"),
+                    "exit_code": payload.get("exit_code"),
+                    "duration_ms": payload.get("duration_ms"),
+                })
+
             # ephemeral secrets in-memory only
             env: dict[str, str] = {}
             try:
@@ -457,6 +470,7 @@ class OrchestratorService:
                 current or "unknown", rec.task.instruction, str(workspace), env,
                 attempt_no, failure_evidence=failure_evidence_text,
                 timeout_seconds=timeout_s,
+                on_event=on_agent_event,
             )
             # quota/auth block handling
             if outcome.status in ("AUTH_REQUIRED", "UNAVAILABLE") and (
